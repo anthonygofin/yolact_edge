@@ -152,28 +152,44 @@ coco_cats = {} # Call prep_coco_cats to fill this
 coco_cats_inv = {}
 color_cache = defaultdict(lambda: {})
 
-def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, mask_alpha=0.45):
+def prep_display(dets_out, img, depth_map, h, w, undo_transform=True, class_color=False, mask_alpha=0.45):
     """
     Note: If undo_transform=False then im_h and im_w are allowed to be None.
     """
     if undo_transform:
         img_numpy = undo_image_transformation(img, w, h)
         img_gpu = torch.Tensor(img_numpy).cuda()
+        
+        depth_numpy = undo_image_transformation(depth_map, w, h)
+        depth_gpu = torch.Tensor(depth_numpy).cuda()
+        
     else:
         img_gpu = img / 255.0
+        depth_gpu = depth_map / 255.0
         h, w, _ = img.shape
+    
+    print('1')
+    print(type(img_gpu))
+    print(type(depth_gpu))
     
     with timer.env('Postprocess'):
         t = postprocess(dets_out, w, h, visualize_lincomb = args.display_lincomb,
                                         crop_masks        = args.crop,
                                         score_threshold   = args.score_threshold)
         torch.cuda.synchronize()
+        
+    print('2')
+    print(type(img_gpu))
+    print(type(depth_gpu))
 
     with timer.env('Copy'):
         if cfg.eval_mask_branch:
             # Masks are drawn on the GPU, so don't copy
             masks = t[3][:args.top_k]
         classes, scores, boxes = [x[:args.top_k].cpu().numpy() for x in t[:3]]
+    print('3')
+    print(type(img_gpu))
+    print(type(depth_gpu))
 
     num_dets_to_consider = min(args.top_k, classes.shape[0])
     for j in range(num_dets_to_consider):
@@ -183,7 +199,11 @@ def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, ma
     
     if num_dets_to_consider == 0:
         # No detections found so just output the original image
-        return (img_gpu * 255).byte().cpu().numpy()
+        return (img_gpu * 255).byte().cpu().numpy(),(depth_gpu * 255).byte().cpu().numpy()
+    
+    print('4')
+    print(type(img_gpu))
+    print(type(depth_gpu))
 
     # Quick and dirty lambda for selecting the color for a particular index
     # Also keeps track of a per-gpu color cache for maximum speed
@@ -202,6 +222,10 @@ def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, ma
                 color = torch.Tensor(color).to(on_gpu).float() / 255.
                 color_cache[on_gpu][color_idx] = color
             return color
+    
+    print('5')
+    print(type(img_gpu))
+    print(type(depth_gpu))
 
     # First, draw the masks on the GPU where we can do it really fast
     # Beware: very fast but possibly unintelligible mask-drawing code ahead
@@ -210,8 +234,15 @@ def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, ma
         # After this, mask is of size [num_dets, h, w, 1]
         masks = masks[:num_dets_to_consider, :, :, None]
         
+        print('6')
+        print(type(img_gpu))
+        print(type(depth_gpu))
+        
         # Prepare the RGB images for each mask given their color (size [num_dets, h, w, 1])
         colors = torch.cat([get_color(j, on_gpu=img_gpu.device.index).view(1, 1, 1, 3) for j in range(num_dets_to_consider)], dim=0)
+        print('6bis')
+        print(type(img_gpu))
+        print(type(depth_gpu))
         masks_color = masks.repeat(1, 1, 1, 3) * colors * mask_alpha
 
         # This is 1 everywhere except for 1-mask_alpha where the mask is
@@ -225,25 +256,36 @@ def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, ma
             inv_alph_cumul = inv_alph_masks[:(num_dets_to_consider-1)].cumprod(dim=0)
             masks_color_cumul = masks_color[1:] * inv_alph_cumul
             masks_color_summand += masks_color_cumul.sum(dim=0)
+            
+        print('7')
+        print(type(img_gpu))
+        print(type(depth_gpu))
 
         img_gpu = img_gpu * inv_alph_masks.prod(dim=0) + masks_color_summand
+        depth_gpu = torch.from_numpy(depth_gpu) * inv_alph_masks.prod(dim=0) + masks_color_summand
+            
         
     # Then draw the stuff that needs to be done on the cpu
     # Note, make sure this is a uint8 tensor or opencv will not anti alias text for whatever reason
     img_numpy = (img_gpu * 255).byte().cpu().numpy()
+    depth_numpy = (depth_gpu * 255).byte().cpu().numpy()
     
     if args.display_text or args.display_bboxes:
         for j in reversed(range(num_dets_to_consider)):
             x1, y1, x2, y2 = boxes[j, :]
+            width = x2-x1
+            height = y2-y1
+            area = width * height 
             color = get_color(j)
             score = scores[j]
 
             if args.display_bboxes:
                 cv2.rectangle(img_numpy, (x1, y1), (x2, y2), color, 1)
+                cv2.rectangle(depth_numpy, (x1, y1), (x2, y2), color, 1)
 
             if args.display_text:
                 _class = cfg.dataset.class_names[classes[j]]
-                text_str = '%s: %.2f' % (_class, score) if args.display_scores else _class
+                text_str = '%s: %.2f, width:%.2f, height:%.2f, area:%.2f' % (_class, score,width ,height ,area) if args.display_scores else _class
 
                 font_face = cv2.FONT_HERSHEY_DUPLEX
                 font_scale = 0.6
@@ -256,8 +298,13 @@ def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, ma
 
                 cv2.rectangle(img_numpy, (x1, y1), (x1 + text_w, y1 - text_h - 4), color, -1)
                 cv2.putText(img_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness, cv2.LINE_AA)
+                cv2.putText(img_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness, cv2.LINE_AA)
+                
+                cv2.rectangle(depth_numpy, (x1, y1), (x1 + text_w, y1 - text_h - 4), color, -1)
+                cv2.putText(depth_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness, cv2.LINE_AA)
+                cv2.putText(depth_numpy, text_str, text_pt, font_face, font_scale, text_color, font_thickness, cv2.LINE_AA)
     
-    return img_numpy
+    return img_numpy, depth_numpy
 
 def prep_benchmark(dets_out, h, w):
     with timer.env('Postprocess'):
