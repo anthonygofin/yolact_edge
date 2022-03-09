@@ -252,14 +252,28 @@ def prep_display(dets_out, img, depth_map, h, w, undo_transform=True, class_colo
         #    for j in range(num_dets_to_consider):
         #        img_gpu = img_gpu * inv_alph_masks[j] + masks_color[j]
         masks_color_summand = masks_color[0]
+        
+        print('masks_color_summand before')
+        print(masks_color_summand, '/n')
+        print(masks_color_summand.shape )
+        
         if num_dets_to_consider > 1:
             inv_alph_cumul = inv_alph_masks[:(num_dets_to_consider-1)].cumprod(dim=0)
             masks_color_cumul = masks_color[1:] * inv_alph_cumul
             masks_color_summand += masks_color_cumul.sum(dim=0)
             
-        print('7')
-        print(type(img_gpu))
-        print(type(depth_gpu))
+        print('masks_color_summand after')
+        print(masks_color_summand, '/n')
+        print(masks_color_summand.shape )
+        
+        print('inv_alph_masks')
+        print(inv_alph_masks, '/n')
+        print(inv_alph_masks.shape )
+        
+        print('inv_alph_masks.prod(dim=0)')
+        print(inv_alph_masks.prod(dim=0), '/n')
+        print(inv_alph_masks.prod(dim=0).shape )
+         
 
         img_gpu = img_gpu * inv_alph_masks.prod(dim=0) + masks_color_summand
         depth_gpu = torch.from_numpy(depth_gpu) * inv_alph_masks.prod(dim=0) + masks_color_summand
